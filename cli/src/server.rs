@@ -272,12 +272,46 @@ fn run_task(state: &AppState, task: &Task) -> Result<u64, String> {
             let r = crate::http::download(&task.canonical, &dest, head.content_length, cookie, referer)?;
             Ok(r.bytes)
         }
-        "douyin" | "kuaishou" | "xiaohongshu" | "bilibili" | "hongguo" => Err(format!(
-            "{} 页面的真实地址需要站内接口解析（v0.2 计划，见 docs/ROADMAP.md）",
+        "douyin" => download_douyin(task, &dest, cookie),
+        "kuaishou" | "xiaohongshu" | "bilibili" | "hongguo" => Err(format!(
+            "{} 页面的真实地址需要站内接口解析（v0.2 仍在做，见 docs/ROADMAP.md）",
             task.platform
         )),
         other => Err(format!("暂不支持的平台：{}", other)),
     }
+}
+
+/// 抖音：先解析页面拿到真实地址，再下载。图集作品落成同名目录 + 序号文件。
+fn download_douyin(task: &Task, dest: &Path, cookie: Option<&Path>) -> Result<u64, String> {
+    const REFERER: &str = "https://www.douyin.com/";
+    let html = crate::http::get_text(&task.canonical, cookie, Some(REFERER))?;
+    let resolved = resfetch_core::douyin::parse_page(&html).map_err(|e| e.to_string())?;
+
+    match resolved.media {
+        resfetch_core::douyin::Media::Video { url, .. } => {
+            fetch_to(&url, dest, cookie, Some(REFERER))
+        }
+        resfetch_core::douyin::Media::Images(urls) => {
+            let dir = dest.with_extension("");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let mut total = 0;
+            for (i, u) in urls.iter().enumerate() {
+                let p = dir.join(format!("{:02}.jpg", i + 1));
+                total += fetch_to(u, &p, cookie, Some(REFERER))?;
+            }
+            Ok(total)
+        }
+    }
+}
+
+/// 单文件下载 + 状态码检查。直链有时效，过期就明确报状态码，让重试重新解析。
+fn fetch_to(url: &str, dest: &Path, cookie: Option<&Path>, referer: Option<&str>) -> Result<u64, String> {
+    let head = crate::http::head(url, cookie, referer)?;
+    if head.status == 403 || head.status == 404 || head.status >= 500 {
+        return Err(format!("取媒体直链返回 HTTP {}（直链有效期内才可下，重试会重新解析）", head.status));
+    }
+    let r = crate::http::download(url, dest, head.content_length, cookie, referer)?;
+    Ok(r.bytes)
 }
 
 fn download_hls(task: &Task, dest: &Path, cookie: Option<&Path>, referer: Option<&str>) -> Result<u64, String> {
