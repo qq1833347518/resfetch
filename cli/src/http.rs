@@ -108,7 +108,7 @@ pub fn download(
 ) -> Result<DownloadResult, String> {
     let part = dest.with_extension(format!(
         "{}part",
-        dest.extension().map(|e| format!("{}.{}", e.to_string_lossy(), "" )).unwrap_or_default()
+        dest.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()
     ));
 
     if let Some(parent) = dest.parent() {
