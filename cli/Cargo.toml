@@ -1,0 +1,12 @@
+[package]
+name = "resfetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "resfetch"
+path = "src/main.rs"
+
+[dependencies]
+resfetch-core = { path = "../core" }
