@@ -13,13 +13,15 @@
 - [x] EPUB3 打包：手写 ZIP、CRC32 校验、mimetype 首条目、XML 转义
 - [x] 日志：分级、脱敏（cookie / token / 手机号 / 邮箱 / 本机路径）、5 秒去重
 - [x] 任务状态机 + 指数退避（1→2→4→8→16→30 封顶）+ 稳定任务 ID
-- [x] CLI：`probe / fetch / hls / cookies / epub / serve`，每个子命令都能单独验证
+- [x] CLI：`probe / fetch / resolve / hls / cookies / epub / serve`，每个子命令都能单独验证
 - [x] 本地 Web UI（三端共用），任务队列由后台线程串行执行
 - [x] 集成测试 `cli/tests/e2e.rs`：起服务 → 建任务 → 校验 JSON 与失败记录
 
 ## v0.2（站内解析，按平台逐个做，做完一个就能用）
 
-- [ ] 抖音：分享页 `_ROUTER_DATA` / `play_addr` 提取（不需要签名，只需 UA + Cookie）
+- [x] 抖音解析器：`_ROUTER_DATA` / `RENDER_DATA` / 渲染后 DOM 三路提取，无水印直链与图集，`resolve` 子命令
+      （实测 2026 年 SSR 已只剩骨架，播放地址靠前端签名请求，所以另两条通道是设计选择，不是退路）
+- [ ] 抖音闭环：壳层 WebView 加载页面后导出 DOM，把"复制直链"这一步省掉（依赖 v0.3 桌面壳）
 - [ ] 快手：`/graphql` 的 `visionVideoDetail` 请求，需要 `kuaishou.web.cp.api` 有效 cookie
 - [ ] 红果短剧：先探测 `protected_playback_unavailable`，再用已登录 cookie 重试
 - [ ] B 站：`x/player/wbi/playurl`，需要 `wbi` 签名（纯算法，不用第三方库）

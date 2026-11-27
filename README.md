@@ -23,14 +23,26 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 | Cookie 保守合并（不覆盖其它站点）、按域/路径挑选发送 | ✅ | `resfetch cookies merge --store ... --incoming ...` |
 | EPUB3 打包（手写 ZIP，mimetype 首条目，CRC 校验） | ✅ | `resfetch epub --title ... --in --out` |
 | 日志分级 + 脱敏（cookie/token/手机号/邮箱/本机路径） | ✅ | 代码内 `log::redact` |
-| 站内接口解析（抖音 `play_addr`、快手 graphql、B站 wbi） | 🚧 v0.2 | 见 `docs/ROADMAP.md` |
+| 抖音解析（`_ROUTER_DATA` / `RENDER_DATA` / 渲染后 DOM 三路，无水印直链、图集） | ✅ | `resfetch resolve <url> [--html 快照]` |
+| 快手 graphql / B站 wbi / 红果 playback | 🚧 v0.2 | 见 `docs/ROADMAP.md` |
 
-没做完的部分是**明确标注**的，不会假装能用：现在贴抖音/快手/B站页面链接进任务，会得到一条 `last_error`，告诉你需要 v0.2 的站内解析。
+没做完的部分是**明确标注**的，不会假装能用：快手/B站页面链接进任务会得到一条 `last_error`，说明缺的是哪一步。
+
+### 抖音为什么不能"贴链接就下"
+
+2026 年抖音已经不再把播放地址放在静态页里了：分享页的 `_ROUTER_DATA` 只剩骨架（`itemId`/`webId`/`serverToken`），真正取地址靠前端请求 + 签名参数，而且无登录态的裸请求大概率直接吃验证页。
+
+本项目的取舍是**不伪造签名**（那是绕过反爬），于是留了两条都合法的通道：
+
+1. **渲染后 DOM**：在已登录的浏览器里打开视频页，导出 HTML → `resfetch resolve <url> --html page.html`，从 `<video src>` 取直链；v0.3 的 macOS 壳会把这个动作变成点一下。
+2. **直链**：从播放器复制 mp4 地址 → `resfetch fetch --url ...`，走断点续传。
+
+解析器本身对三种形态都能吃，离线单测覆盖：SSR 壳页、URL 编码的 `RENDER_DATA`、渲染后 DOM（含 `blob:`/`.m3u8` 误命中排除）。
 
 ## 目录
 
 ```
-core/        零依赖内核：link / naming / cookie / hls / epub / log / plan
+core/        零依赖内核：link / naming / cookie / hls / epub / log / plan / json / douyin
 cli/         CLI + 本地 HTTP 服务 + 任务队列（网络层是系统 curl）
 ui/          三端共用的单页界面（桌面 WebView / 安卓 WebView 同一份）
 docs/        架构与路线图
