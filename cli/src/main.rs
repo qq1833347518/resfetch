@@ -21,6 +21,8 @@ fn usage() -> i32 {
   resfetch version
   resfetch probe <url>...                  识别链接（平台/ID/归一化地址）
   resfetch fetch --url <url> [--dir D]     直接下载单个文件（支持断点续传）
+  resfetch resolve <url> [--cookie 文件] [--html 本地快照]
+                                           解析站内页面，打印真实媒体地址（当前支持抖音）
   resfetch hls <m3u8-url> [--max-height N] 解析播放列表，打印码率与分片清单
   resfetch cookies merge --store <文件> --incoming <文件|-> [--purge]
                                            保守合并 cookie（不覆盖其它站点）
@@ -65,6 +67,7 @@ fn dispatch(args: &[String]) -> i32 {
         }
         "probe" => cmd_probe(&args[1..]),
         "fetch" => cmd_fetch(&args[1..]),
+        "resolve" => cmd_resolve(&args[1..]),
         "hls" => cmd_hls(&args[1..]),
         "cookies" => cmd_cookies(&args[1..]),
         "epub" => cmd_epub(&args[1..]),
@@ -107,6 +110,91 @@ fn cmd_probe(args: &[String]) -> i32 {
         }
     }
     if count == 0 { 2 } else { 0 }
+}
+
+/// 解析站内页面，把真实媒体地址打印出来。
+/// 两个用途：① 有真实 cookie 时直接给出可下载直链；② 抓不到时把
+/// 抖音给的页面（风控页/壳页）原样落到 `--html`，便于离线复现解析问题。
+fn cmd_resolve(args: &[String]) -> i32 {
+    let Some(url) = arg_value(args, "--url").or_else(|| {
+        args.iter().find(|a| a.starts_with("http")).cloned()
+    }) else {
+        return usage();
+    };
+    let cookie = arg_value(args, "--cookie").map(PathBuf::from);
+    let snapshot = arg_value(args, "--html").map(PathBuf::from);
+
+    let parsed = match resfetch_core::link::parse(&url) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("链接无法识别：{}", e);
+            return 2;
+        }
+    };
+    if parsed.platform != resfetch_core::link::Platform::Douyin {
+        eprintln!("resolve 目前只接了抖音（{} 还没做，见 docs/ROADMAP.md v0.2）", parsed.platform.as_str());
+        return 2;
+    }
+
+    let html = match &snapshot {
+        Some(p) => match std::fs::read_to_string(p) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("读不了本地快照 {}：{}", p.display(), e);
+                return 2;
+            }
+        },
+        None => match http::get_text(&parsed.canonical, cookie.as_deref(), Some("https://www.douyin.com/")) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("抓页面失败：{}", e);
+                return 2;
+            }
+        },
+    };
+
+    match resfetch_core::douyin::parse_page(&html) {
+        Ok(r) => {
+            println!("标题：{}", if r.title.is_empty() { "（无标题）" } else { r.title.as_str() });
+            if let Some(a) = &r.author {
+                println!("作者：{}", a);
+            }
+            if !r.id.is_empty() {
+                println!("作品：{}", r.id);
+            }
+            println!("类型：{}", r.media.kind());
+            match &r.media {
+                resfetch_core::douyin::Media::Video { url, duration_ms, size_bytes } => {
+                    if let Some(d) = duration_ms {
+                        println!("时长：{:.1}s", *d as f64 / 1000.0);
+                    }
+                    if let Some(s) = size_bytes {
+                        println!("大小：{}", http::human(*s as u64));
+                    }
+                    println!("直链：{}", url);
+                    println!(
+                        "{{\"kind\":\"video\",\"id\":\"{}\",\"title\":\"{}\",\"url\":\"{}\"}}",
+                        plan::json_escape(&r.id),
+                        plan::json_escape(&r.title),
+                        plan::json_escape(url)
+                    );
+                }
+                resfetch_core::douyin::Media::Images(urls) => {
+                    println!("图片：{} 张", urls.len());
+                    for (i, u) in urls.iter().enumerate() {
+                        println!("  {}. {}", i + 1, u);
+                    }
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("解析失败：{}", e);
+            eprintln!("提示：抖音对无登录态的裸请求普遍返回验证页；用 --cookie 指定 cookies.txt，");
+            eprintln!("      或先用浏览器打开该视频页、把 HTML 存下来，再用 --html 离线解析。");
+            3
+        }
+    }
 }
 
 fn cmd_fetch(args: &[String]) -> i32 {
