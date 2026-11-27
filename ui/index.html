@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>resfetch · 资源下载器</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>resfetch</h1>
+      <span class="ver" id="ver">…</span>
+    </div>
+    <div class="dir" id="dir"></div>
+  </header>
+
+  <section class="composer">
+    <textarea id="input" rows="3" placeholder="粘贴链接，支持一次多行，例如：
+https://www.douyin.com/video/7301234567890123456
+https://www.kuaishou.com/short-video/3xf8abcd
+https://cdn.example.com/ep1/index.m3u8"></textarea>
+    <div class="actions">
+      <button id="add" class="primary">加入队列</button>
+      <button id="clear" class="ghost">清空已完成</button>
+      <span class="hint" id="hint"></span>
+    </div>
+  </section>
+
+  <section class="list">
+    <div class="list-head">
+      <span>任务</span>
+      <span id="summary"></span>
+    </div>
+    <ul id="tasks"></ul>
+    <p class="empty" id="empty">还没有任务。粘一条链接进来试试。</p>
+  </section>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
