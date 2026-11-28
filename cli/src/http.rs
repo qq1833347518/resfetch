@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 pub const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/// 单个文件最多分几次拿完。B 站 mcdn 代理每次只给一小段，次数给足才不会“下不完”。
+const MAX_CHUNKS: u32 = 80;
+
 #[derive(Debug, Clone, Default)]
 pub struct HeadInfo {
     pub status: u16,
@@ -208,6 +211,7 @@ fn append_file(src: &Path, dst: &Path) -> Result<(), String> {
 /// 和 `curl -C -` 的区别：自己在每次尝试前看 `.part` 已多大，再发精确的 `Range`，
 /// 并把拿到的块**追加**进去。B 站 mcdn 代理经常“传一半就断”，而且有时忽略 Range
 /// 返回 200，`curl -C -` 遇到这两种情况会反复覆盖 `.part`、进度归零——这里都按情况处理。
+/// 只要这一次比上一次多了字节，就接着要下一段，不额外等；只有完全没进展才退避。
 ///
 /// 卡死防护：`--connect-timeout` 管连接建不起来，`--speed-limit/--speed-time` 管“连上了但不给数据”，
 /// 两者都只是给单次尝试定个配额，不限制整体下载时长（大文件可以慢慢下）。
@@ -233,7 +237,7 @@ pub fn download(
     let mut last_error = String::from("未知错误");
     let mut ranges_off = !supports_range;
 
-    for attempt in 1..=6u32 {
+    for attempt in 1..=MAX_CHUNKS {
         let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         if total > 0 && have >= total {
             break;
@@ -269,7 +273,7 @@ pub fn download(
         }
         if code == 0 || code >= 400 {
             last_error = format!(
-                "HTTP {}（第 {} 次）：{}",
+                "HTTP {}（第 {} 段）：{}",
                 code,
                 attempt,
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -301,16 +305,19 @@ pub fn download(
             break;
         }
         last_error = format!(
-            "第 {} 次只拿到 {} 字节{}",
+            "第 {} 段只拿到 {} 字节{}",
             attempt,
             got,
             if total > 0 {
-                format!("，还差 {}", total.saturating_sub(now_bytes))
+                format!("，已收 {} / {}", now_bytes, total)
             } else {
                 String::new()
             }
         );
-        std::thread::sleep(Duration::from_secs(1));
+        // 有进展就立刻接着要下一段（CDN 通常只给一小块），没进展才等一下
+        if got == 0 {
+            std::thread::sleep(Duration::from_secs(2));
+        }
     }
 
     let bytes = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
