@@ -17,7 +17,7 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 | 能力 | 状态 | 命令 |
 |---|---|---|
 | 识别链接（抖音/快手/小红书/B站/红果/直链/HLS），去跟踪参数 | ✅ | `resfetch probe <url>` |
-| 直链下载、断点续传（`.part` 命名，中断可续） | ✅ | `resfetch fetch --url ... --dir ...` |
+| 直链下载、分块续传（`Range` 探总长 + `.part` 追加，断连可续） | ✅ | `resfetch fetch --url ... --dir ...` |
 | m3u8 解析：码率筛选、分片清单、加密识别、相对路径还原 | ✅ | `resfetch hls <url> --max-height 720` |
 | m3u8 下载并拼接（含 AES-128 分片解密） | ✅（走 Web UI 任务队列） | `serve` 后贴链接 |
 | HLS AES-128 解密：`EXT-X-KEY` IV / 媒体序号回退、取密钥、去 PKCS#7 | ✅ | 自动，无需开关 |
@@ -26,9 +26,10 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 | EPUB3 打包（手写 ZIP，mimetype 首条目，CRC 校验） | ✅ | `resfetch epub --title ... --in --out` |
 | 日志分级 + 脱敏（cookie/token/手机号/邮箱/本机路径） | ✅ | 代码内 `log::redact` |
 | 抖音解析（`_ROUTER_DATA` / `RENDER_DATA` / 渲染后 DOM 三路，无水印直链、图集） | ✅ | `resfetch resolve <url> [--html 快照]` |
-| 快手 graphql / B站 wbi / 红果 playback | 🚧 v0.2 | 见 `docs/ROADMAP.md` |
+| B 站解析与下载（wbi 签名、DASH 音视频分离、durl 拼接） | ✅ | `resfetch bili <BV号\|链接> [--quality N]` |
+| 快手 graphql / 红果 playback | 🚧 v0.2 | 见 `docs/ROADMAP.md` |
 
-没做完的部分是**明确标注**的，不会假装能用：快手/B站页面链接进任务会得到一条 `last_error`，说明缺的是哪一步。
+没做完的部分是**明确标注**的，不会假装能用：快手、红果的页面链接进任务会得到一条 `last_error`，说明缺的是哪一步（B 站已经不再是占位）。
 
 ### 加密 m3u8 到底能不能下
 
@@ -56,10 +57,27 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 
 解析器本身对三种形态都能吃，离线单测覆盖：SSR 壳页、URL 编码的 `RENDER_DATA`、渲染后 DOM（含 `blob:`/`.m3u8` 误命中排除）。
 
+### B 站为什么能，以及为什么慢
+
+链路很短：`x/web-interface/view` 拿标题和 cid → `x/web-interface/nav` 拿两个 wbi key → `x/player/wbi/playurl` 拿 DASH 地址。麻烦的是中间那个签名：
+
+- 两个 key 的主干拼成 64 字符，按固定置换表取前 32 位当 `mixin_key`；
+- 请求参数加 `wts`、按 key 升序、值做 B 站特例编码（保留 `-._~`，删掉 `!'()*`）；
+- `w_rid = md5(query + mixin_key)`。MD5 自己写在 `core/src/md5.rs`（RFC 1321 向量 + 56/64 字节边界兜底），不引 crate。
+
+接口文档（社区维护、最接近官方口径的记录）：
+
+- wbi 签名：https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md
+- 视频信息 / 播放地址：https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/video/videostream_url.md
+
+慢不是网络问题，是 B 站 CDN（mcdn 代理）本身脾气：HTTP/2 会 `err 92 stream not closed cleanly`、经常传一半就断、有时忽略 `Range` 直接回 200。`cli/src/http.rs` 的处理是：强制 HTTP/1.1、先 `Range: bytes=0-1` 探总长、每次按已下大小发精确 `Range` 并把分块**追加**进 `.part`、连续 4 次零字节就报错（不把死链拖成几分钟）。
+
+DASH 是音视频分开的两条流。本机有 `ffmpeg` 时自动 `-c copy` 合成单文件；没有就把视频落到目标名、音频留成 `xxx.mp4.audio.m4s` 放旁边，并打印合并命令——不假装合并成功。
+
 ## 目录
 
 ```
-core/        零依赖内核：link / naming / cookie / hls / aes / epub / log / plan / store / json / douyin
+core/        零依赖内核：link / naming / cookie / hls / aes / epub / log / plan / store / json / douyin / md5 / bilibili
 cli/         CLI + 本地 HTTP 服务 + 任务队列（网络层是系统 curl）
 ui/          三端共用的单页界面（桌面 WebView / 安卓 WebView 同一份）
 docs/        架构与路线图
@@ -79,6 +97,7 @@ docs/        架构与路线图
 | 三端各写一套重试/退避 | `plan::backoff_secs` 一处定义（1→2→4→8→16→30 封顶） |
 | 为解密去引 `aes`/`cbc` 两个 crate | `aes.rs` 自己写：GF(2^8) 现算 S 盒、单向 CBC 解密，FIPS-197 / SP 800-38A 官方向量兜底 |
 | 重启就得把链接重新贴一遍 | `store.rs` JSONL 快照 + 原子改名，`running` 回来接着跑 |
+| 下载器只会 `-C -` 续传，CDN 一断就重头来 | `http.rs` 自己换算 `Range` 并追加分块；断一次只损失当前那段 |
 
 ## 一句话原则
 

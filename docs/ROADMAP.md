@@ -2,7 +2,7 @@
 
 每条都满足：不改内核的公共接口就能加，而且能用离线单测覆盖。
 
-## v0.1（本项目当前）
+## v0.1（已完成）
 
 - [x] 链接识别与归一化（抖音 / 快手 / 小红书 / B站 / 红果 / HLS / 直链），去跟踪参数
 - [x] 文件名清洗（Windows 非法字符、保留名、UTF-8 安全截断）与同名去重
@@ -25,10 +25,15 @@
       （自己写的 AES-128-CBC，FIPS-197 / NIST SP 800-38A 官方向量单测；SAMPLE-AES 显式拒绝）
 - [x] 任务持久化：`.resfetch/tasks.jsonl` 一行一任务、`.tmp` 原子改名；启动时 `running`→`queued`
       续跑、`done` 不重复下、坏行跳过并计数（重试次数保留，避免重启变成无限重试）
+- [x] 下载器重写：`Range` 探总长 + 分块追加续传（替代 `curl -C -`），修 B 站 mcdn "传一半断/忽略 Range"
+- [x] B 站：`x/web-interface/view` → `x/web-interface/nav` → `x/player/wbi/playurl`
+      wbi 签名与 MD5 都在内核里自写（`core/src/bilibili.rs`、`core/src/md5.rs`），真机接口已验证被接受
+      CLI `resfetch bili` 与 Web UI 任务队均可用；DASH 音视频分离，有 ffmpeg 就合并
+      官方口径文档：https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md
+- [ ] B 站备用 CDN：DASH 响应里有 `backupUrl`，主地址 403/超时后自动换备用（现在是靠分块重试硬扛）
 - [ ] 抖音闭环：壳层 WebView 加载页面后导出 DOM，把"复制直链"这一步省掉（依赖 v0.3 桌面壳）
 - [ ] 快手：`/graphql` 的 `visionVideoDetail` 请求，需要 `kuaishou.web.cp.api` 有效 cookie
 - [ ] 红果短剧：先探测 `protected_playback_unavailable`，再用已登录 cookie 重试
-- [ ] B 站：`x/player/wbi/playurl`，需要 `wbi` 签名（纯算法，不用第三方库）
 
 ## v0.3（壳）
 
