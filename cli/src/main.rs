@@ -24,6 +24,8 @@ fn usage() -> i32 {
   resfetch resolve <url> [--cookie 文件] [--html 本地快照]
                                            解析站内页面，打印真实媒体地址（当前支持抖音）
   resfetch hls <m3u8-url> [--max-height N] 解析播放列表，打印码率与分片清单
+  resfetch bili <BV号|视频链接> [--quality N] [--dir D] [--cookie 文件] [--print]
+                                           B 站：wbi 签名取播放地址并下载（--print 只打印）
   resfetch cookies merge --store <文件> --incoming <文件|-> [--purge]
                                            保守合并 cookie（不覆盖其它站点）
   resfetch cookies header --store <文件> --host h --path p
@@ -69,6 +71,7 @@ fn dispatch(args: &[String]) -> i32 {
         "fetch" => cmd_fetch(&args[1..]),
         "resolve" => cmd_resolve(&args[1..]),
         "hls" => cmd_hls(&args[1..]),
+        "bili" | "bilibili" => cmd_bili(&args[1..]),
         "cookies" => cmd_cookies(&args[1..]),
         "epub" => cmd_epub(&args[1..]),
         "serve" => cmd_serve(&args[1..]),
@@ -500,4 +503,235 @@ fn cmd_serve(args: &[String]) -> i32 {
             3
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// B 站：wbi 签名 → playurl → 下载
+// ---------------------------------------------------------------------------
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 从 "BV1xx..." 或 "https://www.bilibili.com/video/BV1xx..." 里取出 12 位 BV 号
+fn extract_bvid(input: &str) -> Option<String> {
+    if input.len() == 12 && input.starts_with("BV") {
+        return Some(input.to_string());
+    }
+    let pos = input.find("BV")?;
+    let bvid: String = input[pos..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if bvid.len() == 12 {
+        Some(bvid)
+    } else {
+        None
+    }
+}
+
+fn cmd_bili(args: &[String]) -> i32 {
+    let Some(target) = args.iter().find(|a| !a.starts_with("--")).cloned() else {
+        return usage();
+    };
+    let dir = PathBuf::from(arg_value(args, "--dir").unwrap_or_else(|| ".".to_string()));
+    let cookie = arg_value(args, "--cookie").map(PathBuf::from);
+    let qn: u64 = arg_value(args, "--quality").and_then(|v| v.parse().ok()).unwrap_or(80);
+    let print_only = args.iter().any(|a| a == "--print");
+    let referer = "https://www.bilibili.com/";
+
+    // b23.tv 短链先跟随重定向拿真实地址
+    let mut input = target.clone();
+    if input.contains("b23.tv") {
+        match http::head(&input, cookie.as_deref(), Some(referer)) {
+            Ok(h) if !h.effective_url.is_empty() => input = h.effective_url,
+            _ => {
+                eprintln!("短链解析失败，请直接贴 https://www.bilibili.com/video/BV... 形式的地址");
+                return 3;
+            }
+        }
+    }
+    let Some(bvid) = extract_bvid(&input) else {
+        eprintln!("认不出 BV 号：{}", input);
+        return 2;
+    };
+
+    // 1) 视频信息（标题 + cid）
+    let view_url = format!("https://api.bilibili.com/x/web-interface/view?bvid={}", bvid);
+    let info = match http::get_text(&view_url, cookie.as_deref(), Some(referer))
+        .map_err(|e| e.to_string())
+        .and_then(|t| resfetch_core::bilibili::parse_view(&t).map_err(|e| e.to_string()))
+    {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("取视频信息失败：{}", e);
+            return 3;
+        }
+    };
+    println!("{}  {}（cid {}）", info.bvid, info.title, info.cid);
+
+    // 2) nav 取两个 key → mixin_key
+    let nav = match http::get_text("https://api.bilibili.com/x/web-interface/nav", cookie.as_deref(), Some(referer)) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("取 wbi key 失败：{}", e);
+            return 3;
+        }
+    };
+    let mixin = match resfetch_core::bilibili::mixin_key_from_nav(&nav) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("解析 wbi key 失败：{}", e);
+            return 3;
+        }
+    };
+
+    // 3) 签名 playurl（dash 优先，拿得到分离的音轨）
+    let params = resfetch_core::bilibili::playurl_params(&info.bvid, info.cid, qn, true);
+    let query = resfetch_core::bilibili::sign_query(&params, &mixin, now_secs());
+    let play_url = format!("https://api.bilibili.com/x/player/wbi/playurl?{}", query);
+    let body = match http::get_text(&play_url, cookie.as_deref(), Some(referer)) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("请求 playurl 失败：{}", e);
+            return 3;
+        }
+    };
+    let urls = match resfetch_core::bilibili::parse_playurl(&body) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("解析 playurl 失败：{}", e);
+            return 3;
+        }
+    };
+
+    for v in &urls.videos {
+        println!("  视频 id={} bandwidth={} codec={}", v.quality, v.bandwidth, v.codec);
+    }
+    for a in &urls.audios {
+        println!("  音频 id={} bandwidth={} codec={}", a.quality, a.bandwidth, a.codec);
+    }
+    for (i, u) in urls.durl.iter().enumerate() {
+        println!("  分段 {}: {}", i + 1, u);
+    }
+
+    let base_name = resfetch_core::naming::from_url_and_title(
+        &format!("https://www.bilibili.com/video/{}", info.bvid),
+        Some(&info.title),
+        Some("mp4"),
+    );
+
+    if print_only {
+        if let Some(v) = resfetch_core::bilibili::best(&urls.videos) {
+            println!("最优视频：{}", v.url);
+        }
+        if let Some(a) = resfetch_core::bilibili::best(&urls.audios) {
+            println!("最优音频：{}", a.url);
+        }
+        for (i, u) in urls.durl.iter().enumerate() {
+            println!("durl[{}]：{}", i, u);
+        }
+        return 0;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("下载目录不可用：{}", e);
+        return 3;
+    }
+
+    // 4) 下载：durl 直接落成文件；dash 音视频分开下，有 ffmpeg 就合并
+    if !urls.durl.is_empty() {
+        let mut all = Vec::new();
+        for (i, u) in urls.durl.iter().enumerate() {
+            let part = dir.join(format!("{}.part{}.mp4", base_name, i + 1));
+            match http::download(u, &part, 0, cookie.as_deref(), Some(referer)) {
+                Ok(r) => {
+                    println!("分段 {} 完成：{}", i + 1, http::human(r.bytes));
+                    all.push(part);
+                }
+                Err(e) => {
+                    eprintln!("分段 {} 下载失败：{}", i + 1, e);
+                    return 3;
+                }
+            }
+        }
+        let out = dir.join(&base_name);
+        let mut f = match std::fs::File::create(&out) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("创建输出文件失败：{}", e);
+                return 3;
+            }
+        };
+        for p in &all {
+            if let Ok(mut src) = std::fs::File::open(p) {
+                let _ = std::io::copy(&mut src, &mut f);
+            }
+            let _ = std::fs::remove_file(p);
+        }
+        println!("已保存：{}", out.display());
+        return 0;
+    }
+
+    let vstream = resfetch_core::bilibili::best(&urls.videos).map(|s| s.url.clone());
+    let astream = resfetch_core::bilibili::best(&urls.audios).map(|s| s.url.clone());
+    let Some(vurl) = vstream else {
+        eprintln!("没有可用视频流");
+        return 3;
+    };
+
+    let stem = base_name.trim_end_matches(".mp4").to_string();
+    let vpath = dir.join(format!("{}.video.m4s", stem));
+    let apath = dir.join(format!("{}.audio.m4s", stem));
+    match http::download(&vurl, &vpath, 0, cookie.as_deref(), Some(referer)) {
+        Ok(r) => println!("视频流完成：{}", http::human(r.bytes)),
+        Err(e) => {
+            eprintln!("视频流下载失败：{}", e);
+            return 3;
+        }
+    }
+    if let Some(aurl) = astream {
+        match http::download(&aurl, &apath, 0, cookie.as_deref(), Some(referer)) {
+            Ok(r) => println!("音频流完成：{}", http::human(r.bytes)),
+            Err(e) => {
+                eprintln!("音频流下载失败：{}", e);
+                return 3;
+            }
+        }
+    }
+
+    // 有 ffmpeg 就合并成 mp4，没有就把两段留着并说清楚
+    let out = dir.join(&base_name);
+    let merged = apath.exists()
+        && std::process::Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-i")
+            .arg(&vpath)
+            .arg("-i")
+            .arg(&apath)
+            .arg("-c")
+            .arg("copy")
+            .arg(&out)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+    if merged {
+        let _ = std::fs::remove_file(&vpath);
+        let _ = std::fs::remove_file(&apath);
+        println!("已合并并保存：{}", out.display());
+    } else {
+        println!(
+            "音视频已分离保存（本机没有 ffmpeg 或合并失败）：\n  {}\n  {}",
+            vpath.display(),
+            apath.display()
+        );
+        println!("装好 ffmpeg 后可用：ffmpeg -i <video> -i <audio> -c copy out.mp4");
+    }
+    0
 }

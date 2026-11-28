@@ -131,7 +131,7 @@ pub fn download(
 ) -> Result<DownloadResult, String> {
     let part = dest.with_extension(format!(
         "{}part",
-        dest.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()
+        dest.extension().map(|e| format!("{}.{}", e.to_string_lossy())).unwrap_or_default()
     ));
 
     if let Some(parent) = dest.parent() {
@@ -139,7 +139,9 @@ pub fn download(
     }
 
     let mut cmd = curl_base();
-    cmd.arg("-L").arg("-f").arg("--retry").arg("2").arg("--retry-delay").arg("1");
+    cmd.arg("-L").arg("-f").arg("--retry").arg("3").arg("--retry-delay").arg("1");
+    // B 站的 CDN 偶发"传完就 reset"，加上这个才算把可用的字节捡回来
+    cmd.arg("--retry-all-errors");
     cmd.arg("-C").arg("-"); // 续传
     cmd.arg("-o").arg(&part);
     if let Some(c) = cookie_file {
@@ -150,6 +152,11 @@ pub fn download(
     }
     cmd.arg(url);
 
+    // 非 tty（重定向到文件、壳层调用）时不刷进度，免得日志里一堆 \r
+    let tty = {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
+    };
     let started = Instant::now();
     let mut child = cmd
         .stdout(Stdio::inherit())
@@ -166,6 +173,10 @@ pub fn download(
                 break;
             }
             Ok(None) => {
+                if !tty {
+                    std::thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
                 if let Ok(meta) = std::fs::metadata(&part) {
                     let done = meta.len();
                     if expected_total > 0 {
@@ -180,7 +191,9 @@ pub fn download(
             Err(e) => return Err(e.to_string()),
         }
     }
-    eprintln!();
+    if tty {
+        eprintln!();
+    }
 
     let bytes = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
     std::fs::rename(&part, dest).map_err(|e| format!("改名失败：{}", e))?;
