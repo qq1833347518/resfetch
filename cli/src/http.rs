@@ -144,8 +144,12 @@ pub fn download(
     }
 
     let mut cmd = curl_base();
-    cmd.arg("-L").arg("-f").arg("--retry").arg("3").arg("--retry-delay").arg("1");
-    // B 站的 CDN 偶发"传完就 reset"，加上这个才算把可用的字节捡回来
+    // B 站 mcdn 代理对 HTTP/2 不稳（err 92 “stream not closed cleanly”），
+    // 统一走 HTTP/1.1：牺牲一点多路复用，换下载能真正跑完
+    cmd.arg("--http1.1");
+    cmd.arg("-L").arg("-f");
+    cmd.arg("--retry").arg("5").arg("--retry-delay").arg("2");
+    // 除了 5xx，还有“传了一半就 reset”，所以必须 all-errors 才治得住
     cmd.arg("--retry-all-errors");
     cmd.arg("-C").arg("-"); // 续传
     cmd.arg("-o").arg(&part);
