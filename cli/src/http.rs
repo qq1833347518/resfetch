@@ -28,7 +28,7 @@ fn curl_base() -> Command {
 /// HEAD 探测：跟随重定向，取最后一组响应头。
 pub fn head(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> Result<HeadInfo, String> {
     let mut cmd = curl_base();
-    cmd.arg("-I").arg("-L").arg("--max-time").arg("20");
+    cmd.arg("-I").arg("-L").arg("--max-time").arg("20").arg("--connect-timeout").arg("8");
     if let Some(c) = cookie_file {
         cmd.arg("-b").arg(c);
     }
@@ -73,7 +73,7 @@ pub fn head(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> Res
 /// 取文本（m3u8、接口 JSON）
 pub fn get_text(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> Result<String, String> {
     let mut cmd = curl_base();
-    cmd.arg("-L").arg("--max-time").arg("20").arg("-f");
+    cmd.arg("-L").arg("--max-time").arg("20").arg("--connect-timeout").arg("8").arg("-f");
     if let Some(c) = cookie_file {
         cmd.arg("-b").arg(c);
     }
@@ -96,7 +96,7 @@ pub fn get_text(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) ->
 /// 取二进制到内存（AES-128 的密钥就 16 字节，不必落临时文件）
 pub fn get_bytes(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> Result<Vec<u8>, String> {
     let mut cmd = curl_base();
-    cmd.arg("-L").arg("-f").arg("--max-time").arg("30");
+    cmd.arg("-L").arg("-f").arg("--max-time").arg("30").arg("--connect-timeout").arg("8");
     if let Some(c) = cookie_file {
         cmd.arg("-b").arg(c);
     }
@@ -145,10 +145,12 @@ fn total_from_headers(headers: &str) -> Option<u64> {
 }
 
 /// 先发一个 `Range: bytes=0-1` 探总长度：B 站 CDN 的 HEAD 不可用，但 Range 可用。
-/// 返回 (总字节, 是否真的支持 Range)。
+/// 返回 (总字节, 是否真的支持 Range)。失败就返回 None，调用方用调用者给的长度兜底。
 fn probe_total(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> Option<(u64, bool)> {
     let mut cmd = curl_base();
     cmd.arg("--http1.1").arg("-L").arg("-f")
+        .arg("--max-time").arg("20")
+        .arg("--connect-timeout").arg("8")
         .arg("-r").arg("0-1")
         .arg("-D").arg("-")
         .arg("-o").arg(if cfg!(windows) { "NUL" } else { "/dev/null" })
@@ -203,6 +205,9 @@ fn append_file(src: &Path, dst: &Path) -> Result<(), String> {
 /// 和 `curl -C -` 的区别：自己在每次尝试前看 `.part` 已有多大，再发精确的 `Range`，
 /// 并把拿到的块**追加**进去。B 站 mcdn 代理经常“传一半就断”，而且有时忽略 Range
 /// 返回 200，`curl -C -` 遇到这两种情况会反复覆盖 `.part`、进度归零——这里都按情况处理。
+///
+/// 卡死防护：`--connect-timeout` 管连接建不起来，`--speed-limit/--speed-time` 管“连上了但不给数据”，
+/// 两者都只是给单次尝试定个配额，不限制整体下载时长（大文件可以慢慢下）。
 pub fn download(
     url: &str,
     dest: &Path,
@@ -235,7 +240,10 @@ pub fn download(
 
         let mut cmd = curl_base();
         // B 站 mcdn 对 HTTP/2 不稳（err 92），统一 HTTP/1.1
-        cmd.arg("--http1.1").arg("-L").arg("-f");
+        cmd.arg("--http1.1").arg("-L").arg("-f")
+            .arg("--connect-timeout").arg("10")
+            .arg("--speed-limit").arg("20")
+            .arg("--speed-time").arg("30");
         if have > 0 && !ranges_off {
             cmd.arg("-r").arg(format!("{}-", have));
         }
