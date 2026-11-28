@@ -330,8 +330,18 @@ fn download_hls(task: &Task, dest: &Path, cookie: Option<&Path>, referer: Option
         pl = resfetch_core::hls::parse(&text, &playlist_url).map_err(|e| e.to_string())?;
     }
 
-    if pl.encrypted() {
-        return Err("分片是 AES-128 加密的，v0.1 只下明文（v0.2 计划做本地解密）".to_string());
+    if let Some(method) = pl
+        .segments
+        .iter()
+        .filter_map(|s| s.key.as_ref())
+        .filter(|k| k.is_encrypted() && !k.method_supported())
+        .map(|k| k.method.clone())
+        .next()
+    {
+        return Err(format!(
+            "分片是 {} 加密的，本版只支持 AES-128（SAMPLE-AES 需要完整解密链，不做硬跑）",
+            method
+        ));
     }
     if pl.segments.is_empty() {
         return Err("播放列表里没有分片".to_string());
@@ -348,6 +358,41 @@ fn download_hls(task: &Task, dest: &Path, cookie: Option<&Path>, referer: Option
         let r = crate::http::download(&seg.uri, &seg_path, head.content_length, cookie, referer)?;
         total += r.bytes;
         ordered.push(seg_path);
+    }
+
+    // 加密分片：下完之后逐片就地解密，再做拼接
+    if pl.encrypted() {
+        let mut keys: std::collections::HashMap<String, [u8; 16]> = std::collections::HashMap::new();
+        for (i, seg) in pl.segments.iter().enumerate() {
+            let Some(k) = &seg.key else { continue };
+            if !k.is_encrypted() {
+                continue;
+            }
+            let uri = k
+                .uri
+                .as_deref()
+                .ok_or_else(|| "EXT-X-KEY 缺少 URI，无法取密钥".to_string())?;
+            let key = match keys.get(uri) {
+                Some(k) => *k,
+                None => {
+                    let bytes = crate::http::get_bytes(uri, cookie, referer)?;
+                    let key: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                        format!("AES-128 密钥应为 16 字节，{} 返回了 {} 字节", uri, bytes.len())
+                    })?;
+                    keys.insert(uri.to_string(), key);
+                    key
+                }
+            };
+            let iv = k
+                .iv_for(pl.media_sequence + i as u64)
+                .ok_or_else(|| format!("无法解析 IV：{:?}", k.iv))?;
+            let path = seg_dir.join(format!("{:05}.ts", i + 1));
+            let cipher = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let plain =
+                resfetch_core::aes::cbc_decrypt(&key, &iv, &cipher).map_err(|e| e.to_string())?;
+            std::fs::write(&path, &plain).map_err(|e| e.to_string())?;
+            total = total - cipher.len() as u64 + plain.len() as u64;
+        }
     }
 
     let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
