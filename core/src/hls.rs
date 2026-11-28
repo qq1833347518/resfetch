@@ -16,6 +16,19 @@ impl Key {
     pub fn is_encrypted(&self) -> bool {
         !self.method.eq_ignore_ascii_case("NONE")
     }
+
+    /// 本版能解的只有 AES-128（SAMPLE-AES 需要更完整的解密链，明确拒绝而不是硬跑）
+    pub fn method_supported(&self) -> bool {
+        self.method.eq_ignore_ascii_case("AES-128")
+    }
+
+    /// 该分片的 IV：`EXT-X-KEY` 给了 IV 就用它，没给就用媒体序号（RFC 8216 §5.2）
+    pub fn iv_for(&self, sequence: u64) -> Option<[u8; 16]> {
+        match &self.iv {
+            Some(h) => crate::aes::parse_iv(h),
+            None => Some(crate::aes::sequence_iv(sequence)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +63,9 @@ pub struct Playlist {
     pub target_duration: u32,
     pub endlist: bool,
     pub total_duration: f64,
+    /// 第一片的媒体序号（`EXT-X-MEDIA-SEQUENCE`），没写就是 0；
+    /// 没带 IV 的加密分片要靠它推 IV，所以不能丢
+    pub media_sequence: u64,
 }
 
 impl Playlist {
@@ -190,6 +206,7 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist> {
     let mut pending_range: Option<(u64, u64)> = None;
     let mut current_key: Option<Key> = None;
     let mut has_content = false;
+    let mut media_sequence: u64 = 0;
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -232,6 +249,10 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist> {
             pending_range = Some((off, len));
             continue;
         }
+        if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+            media_sequence = rest.trim().parse().unwrap_or(0);
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
             pl.target_duration = rest.trim().parse().unwrap_or(0);
             continue;
@@ -261,6 +282,8 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist> {
         }
         pending_range = None;
     }
+
+    pl.media_sequence = media_sequence;
 
     if !has_content {
         return Err(Error::InvalidPlaylist("播放列表为空".to_string()));
@@ -332,6 +355,31 @@ mod tests {
             Some("https://cdn.example.com/hls/ep1/key.bin")
         );
         assert_eq!(pl.map_uri.as_deref(), Some("https://cdn.example.com/hls/ep1/init.mp4"));
+    }
+
+    #[test]
+    fn media_sequence_and_iv_fallbacks() {
+        let text = "#EXTM3U\n\
+            #EXT-X-MEDIA-SEQUENCE:7\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n\
+            #EXTINF:2,\nseg0.bin\n\
+            #EXTINF:2,\nseg1.bin\n";
+        let pl = parse(text, BASE).unwrap();
+        assert_eq!(pl.media_sequence, 7);
+        let k = pl.segments[0].key.as_ref().unwrap();
+        // 没有 IV 时按媒体序号推：第 0 片用 7，第 1 片用 8
+        assert_eq!(k.iv_for(pl.media_sequence), Some(crate::aes::sequence_iv(7)));
+        assert_eq!(k.iv_for(pl.media_sequence + 1), Some(crate::aes::sequence_iv(8)));
+        assert!(k.method_supported());
+    }
+
+    #[test]
+    fn sample_aes_is_reported_unsupported() {
+        let text = "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n#EXTINF:2,\ns.bin\n";
+        let pl = parse(text, BASE).unwrap();
+        let k = pl.segments[0].key.as_ref().unwrap();
+        assert!(k.is_encrypted());
+        assert!(!k.method_supported());
     }
 
     #[test]
