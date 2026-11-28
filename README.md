@@ -73,7 +73,7 @@ docs/        架构与路线图
 |---|---|
 | 导入 cookie 时整文件覆盖，丢了 65 条 | `cookie::merge` 按 (domain,path,name) 三元组合并，异键一律保留；单测 `merge_never_drops_other_sites` 锁死这个行为 |
 | bitbrowser:// 自定义 scheme 交给系统弹窗 | 内核不做 WebView 策略；壳层统一 `.cancel` 非 http(s)，UI 侧不可能再造出"系统弹窗" |
-| 明明登录了自己却读不回 cookie | Cookie 读取与发送分离，`header_value` 按 RFC 6265 选域/路径，过期单列统计 |
+| 明明登录了却读不回 cookie | Cookie 读取与发送分离，`header_value` 按 RFC 6265 选域/路径，过期单列统计 |
 | 日志里出现明文 cookie、手机号 | `log::redact` 默认打码，且同一条错误 5 秒去重 |
 | 文件名在 Windows/安卓上写不出来 | `naming::sanitize` 按 Windows+FAT 最严格规则清洗，保留名 `CON/NUL` 处理，UTF-8 安全截断 |
 | 三端各写一套重试/退避 | `plan::backoff_secs` 一处定义（1→2→4→8→16→30 封顶） |
