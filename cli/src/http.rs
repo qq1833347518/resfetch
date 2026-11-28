@@ -194,7 +194,8 @@ fn append_file(src: &Path, dst: &Path) -> Result<(), String> {
         .create(true)
         .open(dst)
         .map_err(|e| e.to_string())?;
-    out.write_all(&data).map_err(|e| e.to_string())?
+    out.write_all(&data).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 分块续传下载。
