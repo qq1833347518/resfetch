@@ -121,6 +121,14 @@ pub struct DownloadResult {
     pub elapsed: Duration,
 }
 
+fn part_path(dest: &Path) -> std::path::PathBuf {
+    let ext = dest
+        .extension()
+        .map(|e| format!("{}.part", e.to_string_lossy()))
+        .unwrap_or_else(|| "part".to_string());
+    dest.with_extension(ext)
+}
+
 /// 断点续传下载：先写 `.part`，完成后再改名，中断了下次能接着下。
 pub fn download(
     url: &str,
@@ -129,10 +137,7 @@ pub fn download(
     cookie_file: Option<&Path>,
     referer: Option<&str>,
 ) -> Result<DownloadResult, String> {
-    let part = dest.with_extension(format!(
-        "{}part",
-        dest.extension().map(|e| format!("{}.{}", e.to_string_lossy())).unwrap_or_default()
-    ));
+    let part = part_path(dest);
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -212,5 +217,18 @@ pub fn human(bytes: u64) -> String {
         format!("{} {}", bytes, UNITS[0])
     } else {
         format!("{:.1} {}", v, UNITS[i])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::part_path;
+    use std::path::Path;
+
+    #[test]
+    fn part_path_keeps_extension_and_appends_part() {
+        assert_eq!(part_path(Path::new("a.mp4")), Path::new("a.mp4.part"));
+        assert_eq!(part_path(Path::new("a.part1.mp4")), Path::new("a.part1.mp4.part"));
+        assert_eq!(part_path(Path::new("noext")), Path::new("noext.part"));
     }
 }
