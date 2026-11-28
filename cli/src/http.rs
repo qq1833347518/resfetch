@@ -350,9 +350,24 @@ pub fn download(
     Ok(DownloadResult { bytes, elapsed: started.elapsed() })
 }
 
+pub fn human(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", bytes, UNITS[0])
+    } else {
+        format!("{:.1} {}", v, UNITS[i])
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{part_path, total_from_headers};
+    use super::{human, part_path, total_from_headers};
     use std::path::Path;
 
     #[test]
@@ -368,5 +383,12 @@ mod tests {
         assert_eq!(total_from_headers(headers), Some(20872903));
         assert_eq!(total_from_headers("HTTP/1.1 200 OK\r\n"), None);
         assert_eq!(total_from_headers("content-range: bytes 1-2/*"), None);
+    }
+
+    #[test]
+    fn human_reads_naturally() {
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(1536), "1.5 KB");
+        assert_eq!(human(20872903), "19.9 MB");
     }
 }
