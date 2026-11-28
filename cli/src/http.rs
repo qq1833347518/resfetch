@@ -145,7 +145,7 @@ fn total_from_headers(headers: &str) -> Option<u64> {
 }
 
 /// 先发一个 `Range: bytes=0-1` 探总长度：B 站 CDN 的 HEAD 不可用，但 Range 可用。
-/// 返回 (总字节, 是否真的支持 Range)。失败就返回 None，调用方用调用者给的长度兜底。
+/// 返回 (总字节, 是否真的支持 Range)。失败就返回 None，调用方用自己的 expected_total 兜底。
 fn probe_total(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> Option<(u64, bool)> {
     let mut cmd = curl_base();
     cmd.arg("--http1.1").arg("-L").arg("-f")
@@ -188,6 +188,7 @@ fn probe_total(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> 
     None
 }
 
+/// 把这个分块追到 `.part` 后面，追完就把分块删掉（否则每跑一次就多一个 `.fetching` 垃圾）。
 fn append_file(src: &Path, dst: &Path) -> Result<(), String> {
     use std::io::Write;
     let data = std::fs::read(src).map_err(|e| e.to_string())?;
@@ -197,12 +198,14 @@ fn append_file(src: &Path, dst: &Path) -> Result<(), String> {
         .open(dst)
         .map_err(|e| e.to_string())?;
     out.write_all(&data).map_err(|e| e.to_string())?;
+    drop(out);
+    let _ = std::fs::remove_file(src);
     Ok(())
 }
 
 /// 分块续传下载。
 ///
-/// 和 `curl -C -` 的区别：自己在每次尝试前看 `.part` 已有多大，再发精确的 `Range`，
+/// 和 `curl -C -` 的区别：自己在每次尝试前看 `.part` 已多大，再发精确的 `Range`，
 /// 并把拿到的块**追加**进去。B 站 mcdn 代理经常“传一半就断”，而且有时忽略 Range
 /// 返回 200，`curl -C -` 遇到这两种情况会反复覆盖 `.part`、进度归零——这里都按情况处理。
 ///
@@ -321,6 +324,7 @@ pub fn download(
         ));
     }
     std::fs::rename(&part, dest).map_err(|e| format!("改名失败：{}", e))?;
+    let _ = std::fs::remove_file(part.with_extension("fetching"));
     Ok(DownloadResult { bytes, elapsed: started.elapsed() })
 }
 
