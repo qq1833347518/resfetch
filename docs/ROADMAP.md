@@ -23,11 +23,12 @@
       （实测 2026 年 SSR 已只剩骨架，播放地址靠前端签名请求，所以另两条通道是设计选择，不是退路）
 - [x] HLS AES-128 本地解密：`EXT-X-KEY` 显式 IV 与媒体序号回退、密钥 URI 缓存、逐片解密后拼接
       （自己写的 AES-128-CBC，FIPS-197 / NIST SP 800-38A 官方向量单测；SAMPLE-AES 显式拒绝）
+- [x] 任务持久化：`.resfetch/tasks.jsonl` 一行一任务、`.tmp` 原子改名；启动时 `running`→`queued`
+      续跑、`done` 不重复下、坏行跳过并计数（重试次数保留，避免重启变成无限重试）
 - [ ] 抖音闭环：壳层 WebView 加载页面后导出 DOM，把"复制直链"这一步省掉（依赖 v0.3 桌面壳）
 - [ ] 快手：`/graphql` 的 `visionVideoDetail` 请求，需要 `kuaishou.web.cp.api` 有效 cookie
 - [ ] 红果短剧：先探测 `protected_playback_unavailable`，再用已登录 cookie 重试
 - [ ] B 站：`x/player/wbi/playurl`，需要 `wbi` 签名（纯算法，不用第三方库）
-- [ ] 任务持久化（`.resfetch/tasks.jsonl`，重启续跑）
 
 ## v0.3（壳）
 

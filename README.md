@@ -21,6 +21,7 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 | m3u8 解析：码率筛选、分片清单、加密识别、相对路径还原 | ✅ | `resfetch hls <url> --max-height 720` |
 | m3u8 下载并拼接（含 AES-128 分片解密） | ✅（走 Web UI 任务队列） | `serve` 后贴链接 |
 | HLS AES-128 解密：`EXT-X-KEY` IV / 媒体序号回退、取密钥、去 PKCS#7 | ✅ | 自动，无需开关 |
+| 任务快照与重启续跑（`.resfetch/tasks.jsonl`，原子改名、坏行跳过、`running` 归一到排队） | ✅ | 自动，`serve` 启动时恢复 |
 | Cookie 保守合并（不覆盖其它站点）、按域/路径挑选发送 | ✅ | `resfetch cookies merge --store ... --incoming ...` |
 | EPUB3 打包（手写 ZIP，mimetype 首条目，CRC 校验） | ✅ | `resfetch epub --title ... --in --out` |
 | 日志分级 + 脱敏（cookie/token/手机号/邮箱/本机路径） | ✅ | 代码内 `log::redact` |
@@ -34,6 +35,15 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 能，但只到 `METHOD=AES-128` 这一档：密钥就是 16 字节，一个密钥 URI 对应一份明文分片流，逐片解密再拼接即可。`EXT-X-KEY` 没写 `IV` 时按 `#EXT-X-MEDIA-SEQUENCE` + 分片序号推（RFC 8216 §5.2），这两条路径都有单测。
 
 `SAMPLE-AES` 需要一套完整解密链（ffmpeg 内部那种），本版**显式报错而不是硬跑**——下回来一堆乱码比直接说"这档不支持"更浪费用户时间。
+
+### 关掉窗口/断电后任务还在吗
+
+在。每个任务状态变化都会把整份队列重写到 `<下载目录>/.resfetch/tasks.jsonl`（先写 `.tmp` 再原子改名）：一次几十 KB，比设计 WAL 划算。下次 `serve` 启动时自动读回：
+
+- 上次在跑（`running`）的被杀掉的，回到 `queued` 接着跑，且**退避时间清零**（否则重启得干等到未来某个时间点）；
+- 已完成（`done`）的不重下；
+- 重试次数保留，避免"重启就重新拥有 3 次机会、变成无限重试"；
+- 残缺行/未知状态行跳过并计数，不会因为一行坏了就丢掉整份队列。
 
 ### 抖音为什么不能"贴链接就下"
 
@@ -49,7 +59,7 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 ## 目录
 
 ```
-core/        零依赖内核：link / naming / cookie / hls / aes / epub / log / plan / json / douyin
+core/        零依赖内核：link / naming / cookie / hls / aes / epub / log / plan / store / json / douyin
 cli/         CLI + 本地 HTTP 服务 + 任务队列（网络层是系统 curl）
 ui/          三端共用的单页界面（桌面 WebView / 安卓 WebView 同一份）
 docs/        架构与路线图
@@ -63,11 +73,12 @@ docs/        架构与路线图
 |---|---|
 | 导入 cookie 时整文件覆盖，丢了 65 条 | `cookie::merge` 按 (domain,path,name) 三元组合并，异键一律保留；单测 `merge_never_drops_other_sites` 锁死这个行为 |
 | bitbrowser:// 自定义 scheme 交给系统弹窗 | 内核不做 WebView 策略；壳层统一 `.cancel` 非 http(s)，UI 侧不可能再造出"系统弹窗" |
-| 明明登录了却读不回 cookie | Cookie 读取与发送分离，`header_value` 按 RFC 6265 选域/路径，过期单列统计 |
+| 明明登录了自己却读不回 cookie | Cookie 读取与发送分离，`header_value` 按 RFC 6265 选域/路径，过期单列统计 |
 | 日志里出现明文 cookie、手机号 | `log::redact` 默认打码，且同一条错误 5 秒去重 |
 | 文件名在 Windows/安卓上写不出来 | `naming::sanitize` 按 Windows+FAT 最严格规则清洗，保留名 `CON/NUL` 处理，UTF-8 安全截断 |
 | 三端各写一套重试/退避 | `plan::backoff_secs` 一处定义（1→2→4→8→16→30 封顶） |
 | 为解密去引 `aes`/`cbc` 两个 crate | `aes.rs` 自己写：GF(2^8) 现算 S 盒、单向 CBC 解密，FIPS-197 / SP 800-38A 官方向量兜底 |
+| 重启就得把链接重新贴一遍 | `store.rs` JSONL 快照 + 原子改名，`running` 回来接着跑 |
 
 ## 一句话原则
 
