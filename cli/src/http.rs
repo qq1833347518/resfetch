@@ -93,6 +93,29 @@ pub fn get_text(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) ->
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// 取二进制到内存（AES-128 的密钥就 16 字节，不必落临时文件）
+pub fn get_bytes(url: &str, cookie_file: Option<&Path>, referer: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut cmd = curl_base();
+    cmd.arg("-L").arg("-f").arg("--max-time").arg("30");
+    if let Some(c) = cookie_file {
+        cmd.arg("-b").arg(c);
+    }
+    if let Some(r) = referer {
+        cmd.arg("-e").arg(r);
+    }
+    cmd.arg(url);
+
+    let out = cmd.output().map_err(|e| format!("调不动 curl：{}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "取 {} 失败：{}",
+            url,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
 pub struct DownloadResult {
     pub bytes: u64,
     pub elapsed: Duration,
