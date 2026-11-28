@@ -348,8 +348,9 @@ fn run_task(state: &AppState, task: &Task) -> Result<u64, String> {
             Ok(r.bytes)
         }
         "douyin" => download_douyin(task, &dest, cookie),
-        "kuaishou" | "xiaohongshu" | "bilibili" | "hongguo" => Err(format!(
-            "{} 页面的真实地址需要站内接口解析（v0.2 仍在做，见 docs/ROADMAP.md）",
+        "bilibili" => download_bilibili(task, &dest, cookie),
+        "kuaishou" | "xiaohongshu" | "hongguo" => Err(format!(
+            "{} 页面的真实地址需要站内接口解析（还没接，见 docs/ROADMAP.md）",
             task.platform
         )),
         other => Err(format!("暂不支持的平台：{}", other)),
@@ -387,6 +388,130 @@ fn fetch_to(url: &str, dest: &Path, cookie: Option<&Path>, referer: Option<&str>
     }
     let r = crate::http::download(url, dest, head.content_length, cookie, referer)?;
     Ok(r.bytes)
+}
+
+// ---------------------------------------------------------------------------
+// B 站：wbi 签名 → playurl → 音视频分离下载（有 ffmpeg 就合并）
+// ---------------------------------------------------------------------------
+
+/// 与 CLI 里同一套规则：接受裸 BV 号或带 BV 号的链接（b23.tv 短链在链接层已归一化）。
+fn bvid_of(input: &str) -> Option<String> {
+    if input.len() == 12 && input.starts_with("BV") {
+        return Some(input.to_string());
+    }
+    let pos = input.find("BV")?;
+    let bvid: String = input[pos..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+    if bvid.len() == 12 {
+        Some(bvid)
+    } else {
+        None
+    }
+}
+
+/// 下载目录下的兄弟文件：`a.mp4` + "audio.m4s" → `a.mp4.audio.m4s`
+fn sibling(dest: &Path, suffix: &str) -> PathBuf {
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+    dest.with_file_name(format!("{}.{}", name, suffix))
+}
+
+fn try_merge(video: &Path, audio: &Path, out: &Path) -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-i")
+        .arg(video)
+        .arg("-i")
+        .arg(audio)
+        .arg("-c")
+        .arg("copy")
+        .arg(out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// B 站媒体 CDN 不支持 HEAD（`curl -I` 直接 404），所以不探测长度，直接续传下。
+fn fetch_bili_stream(url: &str, dest: &Path, cookie: Option<&Path>, referer: &str) -> Result<u64, String> {
+    let r = crate::http::download(url, dest, 0, cookie, Some(referer))?;
+    Ok(r.bytes)
+}
+
+fn download_bilibili(task: &Task, dest: &Path, cookie: Option<&Path>) -> Result<u64, String> {
+    const REFERER: &str = "https://www.bilibili.com/";
+    let bvid = bvid_of(&task.canonical).ok_or_else(|| format!("认不出 BV 号：{}", task.canonical))?;
+
+    // 1) 标题与 cid（多 P 用 pages[0]）
+    let view = crate::http::get_text(
+        &format!("https://api.bilibili.com/x/web-interface/view?bvid={}", bvid),
+        cookie,
+        Some(REFERER),
+    )?;
+    let info = resfetch_core::bilibili::parse_view(&view).map_err(|e| e.to_string())?;
+
+    // 2) wbi key
+    let nav = crate::http::get_text("https://api.bilibili.com/x/web-interface/nav", cookie, Some(REFERER))?;
+    let mixin = resfetch_core::bilibili::mixin_key_from_nav(&nav).map_err(|e| e.to_string())?;
+
+    // 3) 签名后的 playurl（fnval=16 取 dash，音量画质分开挑）
+    let query = resfetch_core::bilibili::sign_query(
+        &resfetch_core::bilibili::playurl_params(&info.bvid, info.cid, 80, true),
+        &mixin,
+        now() as u64,
+    );
+    let body = crate::http::get_text(
+        &format!("https://api.bilibili.com/x/player/wbi/playurl?{}", query),
+        cookie,
+        Some(REFERER),
+    )?;
+    let urls = resfetch_core::bilibili::parse_playurl(&body).map_err(|e| e.to_string())?;
+
+    // 老接口给的整段地址：逐段下完按顺序拼成一个文件
+    if !urls.durl.is_empty() {
+        let mut total = 0u64;
+        let mut segs: Vec<PathBuf> = Vec::new();
+        for (i, u) in urls.durl.iter().enumerate() {
+            let p = sibling(dest, &format!("durl{}", i + 1));
+            total += fetch_bili_stream(u, &p, cookie, REFERER)?;
+            segs.push(p);
+        }
+        let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+        for p in &segs {
+            let mut f = std::fs::File::open(p).map_err(|e| e.to_string())?;
+            std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(p);
+        }
+        let n = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(total);
+        return Ok(n);
+    }
+
+    let vurl = resfetch_core::bilibili::best(&urls.videos)
+        .map(|s| s.url.clone())
+        .ok_or_else(|| "playurl 里没有可用视频流".to_string())?;
+    let aurl = resfetch_core::bilibili::best(&urls.audios).map(|s| s.url.clone());
+
+    let vpath = sibling(dest, "video.m4s");
+    let vbytes = fetch_bili_stream(&vurl, &vpath, cookie, REFERER)?;
+
+    if let Some(aurl) = aurl {
+        let apath = sibling(dest, "audio.m4s");
+        let abytes = fetch_bili_stream(&aurl, &apath, cookie, REFERER)?;
+        if try_merge(&vpath, &apath, dest) {
+            let n = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(vbytes + abytes);
+            let _ = std::fs::remove_file(&vpath);
+            let _ = std::fs::remove_file(&apath);
+            return Ok(n);
+        }
+        // 没装 ffmpeg：视频落到目标文件，音频留在旁边，不报失败（下次装了再合也行）
+        std::fs::rename(&vpath, dest).map_err(|e| e.to_string())?;
+        return Ok(vbytes + abytes);
+    }
+
+    std::fs::rename(&vpath, dest).map_err(|e| e.to_string())?;
+    Ok(vbytes)
 }
 
 fn download_hls(task: &Task, dest: &Path, cookie: Option<&Path>, referer: Option<&str>) -> Result<u64, String> {
@@ -477,4 +602,27 @@ fn download_hls(task: &Task, dest: &Path, cookie: Option<&Path>, referer: Option
     }
     let _ = std::fs::remove_dir_all(&seg_dir);
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bvid_of_accepts_bare_and_url_forms() {
+        assert_eq!(bvid_of("BV1GJ411x7h7").as_deref(), Some("BV1GJ411x7h7"));
+        assert_eq!(
+            bvid_of("https://www.bilibili.com/video/BV1GJ411x7h7/?p=1").as_deref(),
+            Some("BV1GJ411x7h7")
+        );
+        assert_eq!(bvid_of("https://example.com/abc"), None);
+    }
+
+    #[test]
+    fn sibling_keeps_full_name() {
+        assert_eq!(
+            sibling(Path::new("/tmp/a.mp4"), "audio.m4s"),
+            Path::new("/tmp/a.mp4.audio.m4s")
+        );
+    }
 }
