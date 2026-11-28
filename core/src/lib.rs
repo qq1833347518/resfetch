@@ -8,6 +8,7 @@
 //! 3. 每个模块都能纯函数测试，不需要真实账号、不需要联网。
 
 pub mod aes;
+pub mod bilibili;
 pub mod cookie;
 pub mod douyin;
 pub mod epub;
@@ -16,6 +17,7 @@ pub mod hls;
 pub mod json;
 pub mod link;
 pub mod log;
+pub mod md5;
 pub mod naming;
 pub mod plan;
 pub mod store;
