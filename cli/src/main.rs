@@ -561,6 +561,20 @@ fn extract_bvid(input: &str) -> Option<String> {
     }
 }
 
+/// 按 `--quality` 选视频流：优先在「画质编号 ≤ qn」里挑最高；
+/// 服务端一档都不给（例如 client 没权限或该视频只有 1080P）就退回最高档，
+/// 并在调用处提示，避免"传了 --quality 32 却默默下了 1080P"。
+fn pick_video<'a>(
+    streams: &'a [resfetch_core::bilibili::Stream],
+    qn: u64,
+) -> Option<&'a resfetch_core::bilibili::Stream> {
+    let capped = streams
+        .iter()
+        .filter(|s| qn == 0 || s.quality <= qn)
+        .max_by_key(|s| (s.quality, s.bandwidth));
+    capped.or_else(|| resfetch_core::bilibili::best(streams))
+}
+
 fn cmd_bili(args: &[String]) -> i32 {
     let Some(target) = args.iter().find(|a| !a.starts_with("--")).cloned() else {
         return usage();
@@ -653,8 +667,8 @@ fn cmd_bili(args: &[String]) -> i32 {
     );
 
     if print_only {
-        if let Some(v) = resfetch_core::bilibili::best(&urls.videos) {
-            println!("最优视频：{}", v.url);
+        if let Some(v) = pick_video(&urls.videos, qn) {
+            println!("最优视频（id={}）：{}", v.quality, v.url);
             for b in &v.backup {
                 println!("  备用：{}", b);
             }
@@ -710,7 +724,15 @@ fn cmd_bili(args: &[String]) -> i32 {
         return 0;
     }
 
-    let vstream = resfetch_core::bilibili::best(&urls.videos).map(|s| s.urls());
+    let picked = pick_video(&urls.videos, qn);
+    if let Some(p) = picked {
+        if qn != 0 && p.quality > qn {
+            println!("提示：没有 ≤{} 的画质，退回最高 {}（{} kbps）", qn, p.quality, p.bandwidth / 1024);
+        } else if qn != 0 {
+            println!("画质：选 {}（{} kbps，上限 {}）", p.quality, p.bandwidth / 1024, qn);
+        }
+    }
+    let vstream = picked.map(|s| s.urls());
     let astream = resfetch_core::bilibili::best(&urls.audios).map(|s| s.urls());
     let Some(vurls) = vstream else {
         eprintln!("没有可用视频流");
@@ -773,6 +795,26 @@ fn cmd_bili(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn st(quality: u64, bandwidth: u64) -> resfetch_core::bilibili::Stream {
+        resfetch_core::bilibili::Stream {
+            quality,
+            bandwidth,
+            codec: "avc1".into(),
+            url: format!("https://cdn/{}.m4s", quality),
+            backup: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pick_video_respects_quality_cap() {
+        let streams = vec![st(16, 200), st(32, 400), st(80, 900)];
+        assert_eq!(pick_video(&streams, 32).unwrap().quality, 32);
+        assert_eq!(pick_video(&streams, 80).unwrap().quality, 80);
+        assert_eq!(pick_video(&streams, 7).unwrap().quality, 80, "一档都不满足就退回最高");
+        assert_eq!(pick_video(&streams, 0).unwrap().quality, 80, "0 表示不限");
+        assert!(pick_video(&[], 32).is_none());
+    }
 
     #[test]
     fn extract_bvid_accepts_bare_and_url_forms() {
