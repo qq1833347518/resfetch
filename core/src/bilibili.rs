@@ -171,6 +171,41 @@ pub struct Stream {
     pub bandwidth: u64,
     pub codec: String,
     pub url: String,
+    /// `backupUrl`：主地址 403 / 超时时可换的同内容备用地址
+    pub backup: Vec<String>,
+}
+
+impl Stream {
+    /// 主地址在前、备用在后，按顺序试。下载器失败一次就换下一个。
+    pub fn urls(&self) -> Vec<String> {
+        let mut v = vec![self.url.clone()];
+        for b in &self.backup {
+            if !b.is_empty() && b != &self.url {
+                v.push(b.clone());
+            }
+        }
+        v
+    }
+}
+
+/// 兼容 `backupUrl`（数组）/ `backup_url`（数组或单串）/ `backupurl`
+fn backup_urls(v: &json::Value) -> Vec<String> {
+    let node = v
+        .get("backupUrl")
+        .or_else(|| v.get("backup_url"))
+        .or_else(|| v.get("backupurl"));
+    let Some(node) = node else {
+        return Vec::new();
+    };
+    match node {
+        json::Value::Arr(items) => items
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+            .collect(),
+        json::Value::Str(s) if !s.is_empty() => vec![s.to_string()],
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -196,6 +231,7 @@ fn stream_from(v: &json::Value) -> Option<Stream> {
             .unwrap_or("")
             .to_string(),
         url: url.to_string(),
+        backup: backup_urls(v),
     })
 }
 
@@ -359,6 +395,33 @@ mod tests {
         assert_eq!(p.videos.len(), 2);
         assert_eq!(best(&p.videos).unwrap().url, "https://cdn/v80.m4s");
         assert_eq!(p.audios.len(), 1);
+    }
+
+    #[test]
+    fn parse_playurl_keeps_backup_urls() {
+        let body = r#"{"code":0,"data":{"dash":{"video":[
+            {"id":80,"bandwidth":2000,"codecs":"hev1","baseUrl":"https://main/v.m4s",
+             "backupUrl":["https://b1/v.m4s","https://b2/v.m4s"]}],
+            "audio":[{"id":30280,"bandwidth":300,"codecs":"mp4a","baseUrl":"https://main/a.m4s",
+             "backup_url":"https://b1/a.m4s"}]}}}"#;
+        let p = parse_playurl(body).unwrap();
+        let v = best(&p.videos).unwrap();
+        assert_eq!(v.url, "https://main/v.m4s");
+        assert_eq!(v.backup, vec!["https://b1/v.m4s", "https://b2/v.m4s"]);
+        assert_eq!(v.urls().len(), 3, "主地址 + 两条备用");
+        assert_eq!(p.audios[0].urls(), vec!["https://main/a.m4s", "https://b1/a.m4s"]);
+    }
+
+    #[test]
+    fn urls_dedupes_identical_backup() {
+        let s = Stream {
+            quality: 80,
+            bandwidth: 1,
+            codec: "avc1".into(),
+            url: "https://same/x.m4s".into(),
+            backup: vec!["https://same/x.m4s".into(), "".into()],
+        };
+        assert_eq!(s.urls(), vec!["https://same/x.m4s"]);
     }
 
     #[test]
