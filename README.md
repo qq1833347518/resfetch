@@ -26,7 +26,7 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 | EPUB3 打包（手写 ZIP，mimetype 首条目，CRC 校验） | ✅ | `resfetch epub --title ... --in --out` |
 | 日志分级 + 脱敏（cookie/token/手机号/邮箱/本机路径） | ✅ | 代码内 `log::redact` |
 | 抖音解析（`_ROUTER_DATA` / `RENDER_DATA` / 渲染后 DOM 三路，无水印直链、图集） | ✅ | `resfetch resolve <url> [--html 快照]` |
-| B 站解析与下载（wbi 签名、DASH 音视频分离、durl 拼接） | ✅ | `resfetch bili <BV号\|链接> [--quality N]` |
+| B 站解析与下载（wbi 签名、DASH 音视频分离、`--quality` 画质上限、主/备用 CDN 自动切换） | ✅ | `resfetch bili <BV号\|链接> [--quality N]` |
 | 快手 graphql / 红果 playback | 🚧 v0.2 | 见 `docs/ROADMAP.md` |
 
 没做完的部分是**明确标注**的，不会假装能用：快手、红果的页面链接进任务会得到一条 `last_error`，说明缺的是哪一步（B 站已经不再是占位）。
@@ -48,7 +48,7 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 
 ### 抖音为什么不能"贴链接就下"
 
-2026 年抖音已经不再把播放地址放在静态页里了：分享页的 `_ROUTER_DATA` 只剩骨架（`itemId`/`webId`/`serverToken`），真正取地址靠前端请求 + 签名参数，而且无登录态的裸请求大概率直接吃验证页。
+2026 年抖音已经不再把播放地址放在静态页里了：分享页的 `_ROUTER_DATA` 只剩脰架（`itemId`/`webId`/`serverToken`），真正取地址靠前端请求 + 签名参数，而且无登录态的裸请求大概率直接吃验证页。
 
 本项目的取舍是**不伪造签名**（那是绕过反爬），于是留了两条都合法的通道：
 
@@ -72,7 +72,16 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 
 慢不是网络问题，是 B 站 CDN（mcdn 代理）本身脾气：HTTP/2 会 `err 92 stream not closed cleanly`、经常传一半就断、有时忽略 `Range` 直接回 200。`cli/src/http.rs` 的处理是：强制 HTTP/1.1、先 `Range: bytes=0-1` 探总长、每次按已下大小发精确 `Range` 并把分块**追加**进 `.part`、连续 4 次零字节就报错（不把死链拖成几分钟）。
 
+每条流实际给了 **主地址 + 两条备用**（不同 CDN：`upos-sz-mirror*`、`mountaintoys` 等）。内核把 `backupUrl` 收进 `Stream::urls()`，下载时主地地址失败就换备用；镜像内容逐字节相同，所以 `.part` 里已下的部分直接继续追，不用从头再下。两条通道（CLI 与 Web UI）都是这个顺序。
+
 DASH 是音视频分开的两条流。本机有 `ffmpeg` 时自动 `-c copy` 合成单文件；没有就把视频落到目标名、音频留成 `xxx.mp4.audio.m4s` 放旁边，并打印合并命令——不假装合并成功。
+
+### `--quality` 到底选哪一档
+
+B 站的画质是编号（16=360P、32=480P、64=720P、80=1080P、112=1080P+、120=4K），`--quality` 是**上限**不是目标值：
+
+- 传 `--quality 32`，就只在 360P/480P 里挑码率最高的，不会默默给你 1080P；
+- 服务端一档都不满足（例如没登录只能拿 1080P、而你只要 480P），退回最高档并打印一行提示，不会静默降级/升级。
 
 ## 目录
 
