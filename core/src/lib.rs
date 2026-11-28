@@ -1,4 +1,4 @@
-//! resfetch-core —— 资源下载器的跳平台内核。
+//! resfetch-core —— 资源下载器的跨平台内核。
 //!
 //! 设计原则（也是这个项目存在的理由）：
 //! 1. 本 crate **零第三方依赖**，只依赖 `std`。三端（macOS / Windows / Android）

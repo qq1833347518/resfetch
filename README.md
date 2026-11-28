@@ -19,7 +19,8 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 | 识别链接（抖音/快手/小红书/B站/红果/直链/HLS），去跟踪参数 | ✅ | `resfetch probe <url>` |
 | 直链下载、断点续传（`.part` 命名，中断可续） | ✅ | `resfetch fetch --url ... --dir ...` |
 | m3u8 解析：码率筛选、分片清单、加密识别、相对路径还原 | ✅ | `resfetch hls <url> --max-height 720` |
-| m3u8 下载并拼接（明文分片） | ✅（走 Web UI 任务队列） | `serve` 后贴链接 |
+| m3u8 下载并拼接（含 AES-128 分片解密） | ✅（走 Web UI 任务队列） | `serve` 后贴链接 |
+| HLS AES-128 解密：`EXT-X-KEY` IV / 媒体序号回退、取密钥、去 PKCS#7 | ✅ | 自动，无需开关 |
 | Cookie 保守合并（不覆盖其它站点）、按域/路径挑选发送 | ✅ | `resfetch cookies merge --store ... --incoming ...` |
 | EPUB3 打包（手写 ZIP，mimetype 首条目，CRC 校验） | ✅ | `resfetch epub --title ... --in --out` |
 | 日志分级 + 脱敏（cookie/token/手机号/邮箱/本机路径） | ✅ | 代码内 `log::redact` |
@@ -27,6 +28,12 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 | 快手 graphql / B站 wbi / 红果 playback | 🚧 v0.2 | 见 `docs/ROADMAP.md` |
 
 没做完的部分是**明确标注**的，不会假装能用：快手/B站页面链接进任务会得到一条 `last_error`，说明缺的是哪一步。
+
+### 加密 m3u8 到底能不能下
+
+能，但只到 `METHOD=AES-128` 这一档：密钥就是 16 字节，一个密钥 URI 对应一份明文分片流，逐片解密再拼接即可。`EXT-X-KEY` 没写 `IV` 时按 `#EXT-X-MEDIA-SEQUENCE` + 分片序号推（RFC 8216 §5.2），这两条路径都有单测。
+
+`SAMPLE-AES` 需要一套完整解密链（ffmpeg 内部那种），本版**显式报错而不是硬跑**——下回来一堆乱码比直接说"这档不支持"更浪费用户时间。
 
 ### 抖音为什么不能"贴链接就下"
 
@@ -42,7 +49,7 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 ## 目录
 
 ```
-core/        零依赖内核：link / naming / cookie / hls / epub / log / plan / json / douyin
+core/        零依赖内核：link / naming / cookie / hls / aes / epub / log / plan / json / douyin
 cli/         CLI + 本地 HTTP 服务 + 任务队列（网络层是系统 curl）
 ui/          三端共用的单页界面（桌面 WebView / 安卓 WebView 同一份）
 docs/        架构与路线图
@@ -60,6 +67,7 @@ docs/        架构与路线图
 | 日志里出现明文 cookie、手机号 | `log::redact` 默认打码，且同一条错误 5 秒去重 |
 | 文件名在 Windows/安卓上写不出来 | `naming::sanitize` 按 Windows+FAT 最严格规则清洗，保留名 `CON/NUL` 处理，UTF-8 安全截断 |
 | 三端各写一套重试/退避 | `plan::backoff_secs` 一处定义（1→2→4→8→16→30 封顶） |
+| 为解密去引 `aes`/`cbc` 两个 crate | `aes.rs` 自己写：GF(2^8) 现算 S 盒、单向 CBC 解密，FIPS-197 / SP 800-38A 官方向量兜底 |
 
 ## 一句话原则
 
