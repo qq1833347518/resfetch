@@ -20,9 +20,9 @@
 ## v0.2（站内解析，按平台逐个做，做完一个就能用）
 
 - [x] 抖音解析器：`_ROUTER_DATA` / `RENDER_DATA` / 渲染后 DOM 三路提取，无水印直链与图集，`resolve` 子命令
-      （实测 2026 年 SSR 已只剩骨架，播放地址靠前端签名请求，所以另两条通道是设计选择，不是退路）
+      （实测 2026 年 SSR 已只剩脰架，播放地址靠前端签名请求，所以另两条通道是设计选择，不是退路）
 - [x] HLS AES-128 本地解密：`EXT-X-KEY` 显式 IV 与媒体序号回退、密钥 URI 缓存、逐片解密后拼接
-      （自己写的 AES-128-CBC，FIPS-197 / NIST SP 800-38A 官方向量单测；SAMPLE-AES 显式拒绝）
+      （自己写的 AES-128-CBC，FIPS-197 / NIST SP 800-38A 官方向量单测；SAMPLE-AES 显式拒绕）
 - [x] 任务持久化：`.resfetch/tasks.jsonl` 一行一任务、`.tmp` 原子改名；启动时 `running`→`queued`
       续跑、`done` 不重复下、坏行跳过并计数（重试次数保留，避免重启变成无限重试）
 - [x] 下载器重写：`Range` 探总长 + 分块追加续传（替代 `curl -C -`），修 B 站 mcdn "传一半断/忽略 Range"
@@ -30,7 +30,9 @@
       wbi 签名与 MD5 都在内核里自写（`core/src/bilibili.rs`、`core/src/md5.rs`），真机接口已验证被接受
       CLI `resfetch bili` 与 Web UI 任务队均可用；DASH 音视频分离，有 ffmpeg 就合并
       官方口径文档：https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md
-- [ ] B 站备用 CDN：DASH 响应里有 `backupUrl`，主地址 403/超时后自动换备用（现在是靠分块重试硬扛）
+- [x] B 站备用 CDN：`backupUrl` 进内核（`Stream::urls()`），Web UI 下载器主地址失败自动换备用；
+      镜像内容一政，`.part` 已下部分直接继续追加（实测整条任务 26,281,101 字节下完）
+- [ ] B 站 CLI 也走 `backupUrl`（现在 CLI 只拿主地址，失败就报错；Web UI 已切备用）
 - [ ] 抖音闭环：壳层 WebView 加载页面后导出 DOM，把"复制直链"这一步省掉（依赖 v0.3 桌面壳）
 - [ ] 快手：`/graphql` 的 `visionVideoDetail` 请求，需要 `kuaishou.web.cp.api` 有效 cookie
 - [ ] 红果短剧：先探测 `protected_playback_unavailable`，再用已登录 cookie 重试
