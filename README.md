@@ -72,7 +72,7 @@ cargo run --release -- serve --port 8787 --dir ~/Downloads/resfetch --ui ui
 
 慢不是网络问题，是 B 站 CDN（mcdn 代理）本身脾气：HTTP/2 会 `err 92 stream not closed cleanly`、经常传一半就断、有时忽略 `Range` 直接回 200。`cli/src/http.rs` 的处理是：强制 HTTP/1.1、先 `Range: bytes=0-1` 探总长、每次按已下大小发精确 `Range` 并把分块**追加**进 `.part`、连续 4 次零字节就报错（不把死链拖成几分钟）。
 
-每条流实际给了 **主地址 + 两条备用**（不同 CDN：`upos-sz-mirror*`、`mountaintoys` 等）。内核把 `backupUrl` 收进 `Stream::urls()`，下载时主地地址失败就换备用；镜像内容逐字节相同，所以 `.part` 里已下的部分直接继续追，不用从头再下。两条通道（CLI 与 Web UI）都是这个顺序。
+每条流实际给了 **主地址 + 两条备用**（不同 CDN：`upos-sz-mirror*`、`mountaintoys` 等）。内核把 `backupUrl` 收进 `Stream::urls()`，下载时主地址失败就换备用；镜像内容逐字节相同，所以 `.part` 里已下的部分直接继续追，不用从头再下。CLI 与 Web UI 都是这个顺序。
 
 DASH 是音视频分开的两条流。本机有 `ffmpeg` 时自动 `-c copy` 合成单文件；没有就把视频落到目标名、音频留成 `xxx.mp4.audio.m4s` 放旁边，并打印合并命令——不假装合并成功。
 
@@ -81,7 +81,7 @@ DASH 是音视频分开的两条流。本机有 `ffmpeg` 时自动 `-c copy` 合
 B 站的画质是编号（16=360P、32=480P、64=720P、80=1080P、112=1080P+、120=4K），`--quality` 是**上限**不是目标值：
 
 - 传 `--quality 32`，就只在 360P/480P 里挑码率最高的，不会默默给你 1080P；
-- 服务端一档都不满足（例如没登录只能拿 1080P、而你只要 480P），退回最高档并打印一行提示，不会静默降级/升级。
+- 服务端一档都不满足（例如该视频只有 1080P、而你只要 480P），退回最高档并打印一行提示，不会静默降级/升级。
 
 ## 目录
 
