@@ -7,6 +7,34 @@ mod server;
 use resfetch_core::plan;
 use std::path::{Path, PathBuf};
 
+/// B 站流的 `baseUrl` 与 `backupUrl` 互为镜像（同一份内容逐字节相同），
+/// 所以主地址失败时换备用继续，`.part` 里已下的部分照样能追加，不用从头再下。
+fn download_bili_stream(
+    urls: &[String],
+    dest: &Path,
+    cookie: Option<&Path>,
+    referer: &str,
+) -> Result<u64, String> {
+    let mut last = String::from("没有可用地址");
+    for (i, u) in urls.iter().enumerate() {
+        match http::download(u, dest, 0, cookie, Some(referer)) {
+            Ok(r) => {
+                if i > 0 {
+                    println!("已切到备用地址 #{}", i);
+                }
+                return Ok(r.bytes);
+            }
+            Err(e) => {
+                last = format!("地址 #{} 失败：{}", i, e);
+                if i + 1 < urls.len() {
+                    eprintln!("{}，换备用地址", last);
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = dispatch(&args);
@@ -627,9 +655,15 @@ fn cmd_bili(args: &[String]) -> i32 {
     if print_only {
         if let Some(v) = resfetch_core::bilibili::best(&urls.videos) {
             println!("最优视频：{}", v.url);
+            for b in &v.backup {
+                println!("  备用：{}", b);
+            }
         }
         if let Some(a) = resfetch_core::bilibili::best(&urls.audios) {
             println!("最优音频：{}", a.url);
+            for b in &a.backup {
+                println!("  备用：{}", b);
+            }
         }
         for (i, u) in urls.durl.iter().enumerate() {
             println!("durl[{}]：{}", i, u);
@@ -676,9 +710,9 @@ fn cmd_bili(args: &[String]) -> i32 {
         return 0;
     }
 
-    let vstream = resfetch_core::bilibili::best(&urls.videos).map(|s| s.url.clone());
-    let astream = resfetch_core::bilibili::best(&urls.audios).map(|s| s.url.clone());
-    let Some(vurl) = vstream else {
+    let vstream = resfetch_core::bilibili::best(&urls.videos).map(|s| s.urls());
+    let astream = resfetch_core::bilibili::best(&urls.audios).map(|s| s.urls());
+    let Some(vurls) = vstream else {
         eprintln!("没有可用视频流");
         return 3;
     };
@@ -686,16 +720,16 @@ fn cmd_bili(args: &[String]) -> i32 {
     let stem = base_name.trim_end_matches(".mp4").to_string();
     let vpath = dir.join(format!("{}.video.m4s", stem));
     let apath = dir.join(format!("{}.audio.m4s", stem));
-    match http::download(&vurl, &vpath, 0, cookie.as_deref(), Some(referer)) {
-        Ok(r) => println!("视频流完成：{}", http::human(r.bytes)),
+    match download_bili_stream(&vurls, &vpath, cookie.as_deref(), referer) {
+        Ok(r) => println!("视频流完成：{}", http::human(r)),
         Err(e) => {
             eprintln!("视频流下载失败：{}", e);
             return 3;
         }
     }
-    if let Some(aurl) = astream {
-        match http::download(&aurl, &apath, 0, cookie.as_deref(), Some(referer)) {
-            Ok(r) => println!("音频流完成：{}", http::human(r.bytes)),
+    if let Some(aurls) = astream {
+        match download_bili_stream(&aurls, &apath, cookie.as_deref(), referer) {
+            Ok(r) => println!("音频流完成：{}", http::human(r)),
             Err(e) => {
                 eprintln!("音频流下载失败：{}", e);
                 return 3;
@@ -734,4 +768,19 @@ fn cmd_bili(args: &[String]) -> i32 {
         println!("装好 ffmpeg 后可用：ffmpeg -i <video> -i <audio> -c copy out.mp4");
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_bvid_accepts_bare_and_url_forms() {
+        assert_eq!(extract_bvid("BV1GJ411x7h7").as_deref(), Some("BV1GJ411x7h7"));
+        assert_eq!(
+            extract_bvid("https://www.bilibili.com/video/BV1GJ411x7h7/?p=1").as_deref(),
+            Some("BV1GJ411x7h7")
+        );
+        assert_eq!(extract_bvid("https://example.com/abc"), None);
+    }
 }
