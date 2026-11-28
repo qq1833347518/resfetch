@@ -18,6 +18,7 @@ pub mod link;
 pub mod log;
 pub mod naming;
 pub mod plan;
+pub mod store;
 
 pub use error::{Error, Result};
 

@@ -6,6 +6,7 @@
 use resfetch_core::link;
 use resfetch_core::naming;
 use resfetch_core::plan::{Task, TaskState};
+use resfetch_core::store;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -26,6 +27,59 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// 任务快照文件：`<下载目录>/.resfetch/tasks.jsonl`
+    pub fn state_path(&self) -> PathBuf {
+        self.dir.join(store::STATE_DIR).join(store::STATE_FILE)
+    }
+
+    /// 整份重写快照（先写 `.tmp` 再原子改名，断电也不会写出半份文件）。
+    /// 单个任务几十到几百字节，几百个任务也就几十 KB，不必做增量日志。
+    pub fn persist(&self) {
+        let text = {
+            let tasks = self.tasks.lock().unwrap();
+            store::encode(&tasks)
+        };
+        let path = self.state_path();
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, text.as_bytes()).is_err() {
+            return;
+        }
+        let _ = std::fs::rename(&tmp, &path);
+    }
+
+    /// 启动时读回上次的任务；返回 (恢复条数, 跳过坏行数)。
+    /// `running` 归一到 `queued`（重启后接着跑），`done` 保持完成（不重复下）。
+    pub fn restore(&self) -> (usize, usize) {
+        let path = self.state_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let decoded = store::decode(&text);
+        let skipped = decoded.skipped;
+        let mut restored = 0usize;
+        let mut tasks = self.tasks.lock().unwrap();
+        let mut taken: std::collections::HashSet<String> = tasks
+            .iter()
+            .map(|t| format!("{}/{}", t.dir, t.filename))
+            .collect();
+        for mut t in decoded.tasks {
+            store::normalize_on_load(&mut t);
+            if t.state.can_start() {
+                // 清掉上次的退避时间，否则重启后要等到未来某个时间点才动
+                t.updated = 0;
+            }
+            t.dir = self.dir.to_string_lossy().to_string();
+            t.filename = naming::unique(&t.filename, &taken);
+            taken.insert(format!("{}/{}", t.dir, t.filename));
+            tasks.push(t);
+            restored += 1;
+        }
+        (restored, skipped)
+    }
+
     pub fn snapshot_json(&self) -> String {
         let tasks = self.tasks.lock().unwrap();
         let items: Vec<String> = tasks.iter().map(|t| t.to_json()).collect();
@@ -55,6 +109,10 @@ impl AppState {
             added.push(task.clone());
             tasks.push(task);
         }
+        drop(tasks);
+        if !added.is_empty() {
+            self.persist();
+        }
         added
     }
 }
@@ -63,6 +121,19 @@ pub fn run(port: u16, state: AppState) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("端口 {} 绑定失败：{}", port, e))?;
     println!("resfetch {} 已启动：http://127.0.0.1:{}", resfetch_core::VERSION, port);
     println!("下载目录：{}", state.dir.display());
+
+    let (restored, skipped) = state.restore();
+    if restored > 0 || skipped > 0 {
+        println!(
+            "已恢复 {} 个任务{}",
+            restored,
+            if skipped > 0 {
+                format!("（跳过 {} 条坏记录）", skipped)
+            } else {
+                String::new()
+            }
+        );
+    }
 
     spawn_worker(state.clone());
 
@@ -141,6 +212,8 @@ fn handle(mut stream: TcpStream, state: AppState) -> std::io::Result<()> {
         ("POST", "/api/clear") => {
             let mut tasks = state.tasks.lock().unwrap();
             tasks.retain(|t| !t.state.is_terminal());
+            drop(tasks);
+            state.persist();
             respond(&mut stream, 200, json, "{\"ok\":true}")?;
         }
         ("GET", "/") | ("GET", "/index.html") => {
@@ -250,6 +323,8 @@ fn spawn_worker(state: AppState) {
                     }
                 }
             }
+            drop(tasks);
+            state.persist();
         }
     });
 }
