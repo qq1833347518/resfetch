@@ -30,9 +30,9 @@
       wbi 签名与 MD5 都在内核里自写（`core/src/bilibili.rs`、`core/src/md5.rs`），真机接口已验证被接受
       CLI `resfetch bili` 与 Web UI 任务队均可用；DASH 音视频分离，有 ffmpeg 就合并
       官方口径文档：https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md
-- [x] B 站备用 CDN：`backupUrl` 进内核（`Stream::urls()`），Web UI 下载器主地址失败自动换备用；
+- [x] B 站备用 CDN：`backupUrl` 进内核（`Stream::urls()`），Web UI 与 CLI 均主地址失败自动换备用；
       镜像内容一政，`.part` 已下部分直接继续追加（实测整条任务 26,281,101 字节下完）
-- [ ] B 站 CLI 也走 `backupUrl`（现在 CLI 只拿主地址，失败就报错；Web UI 已切备用）
+      真机实测每条流带 2 条备用（不同 CDN：upos mirror / mountaintoys），`resfetch bili --print` 可看到
 - [ ] 抖音闭环：壳层 WebView 加载页面后导出 DOM，把"复制直链"这一步省掉（依赖 v0.3 桌面壳）
 - [ ] 快手：`/graphql` 的 `visionVideoDetail` 请求，需要 `kuaishou.web.cp.api` 有效 cookie
 - [ ] 红果短剧：先探测 `protected_playback_unavailable`，再用已登录 cookie 重试
