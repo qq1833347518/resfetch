@@ -13,6 +13,8 @@ pub const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKi
 
 /// 单个文件最多分几次拿完。B 站 mcdn 代理每次只给一小段，次数给足才不会“下不完”。
 const MAX_CHUNKS: u32 = 80;
+/// 连续这么多次一点字节都没拿到，就直接认输——死链接不能拖到 80 次退避。
+const MAX_DEAD_ROUNDS: u32 = 4;
 
 #[derive(Debug, Clone, Default)]
 pub struct HeadInfo {
@@ -213,6 +215,9 @@ fn append_file(src: &Path, dst: &Path) -> Result<(), String> {
 /// 返回 200，`curl -C -` 遇到这两种情况会反复覆盖 `.part`、进度归零——这里都按情况处理。
 /// 只要这一次比上一次多了字节，就接着要下一段，不额外等；只有完全没进展才退避。
 ///
+/// 但“一直没进展”不等于“CDN 很慢”，可能是地址根本连不上：连续 MAX_DEAD_ROUNDS 次零字节
+/// 就立刻报错返回，让任务进入重试/失败流程，不把一个死链拖成几分钟的静默等待。
+///
 /// 卡死防护：`--connect-timeout` 管连接建不起来，`--speed-limit/--speed-time` 管“连上了但不给数据”，
 /// 两者都只是给单次尝试定个配额，不限制整体下载时长（大文件可以慢慢下）。
 pub fn download(
@@ -236,6 +241,7 @@ pub fn download(
     let started = Instant::now();
     let mut last_error = String::from("未知错误");
     let mut ranges_off = !supports_range;
+    let mut dead_rounds = 0u32;
 
     for attempt in 1..=MAX_CHUNKS {
         let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
@@ -279,6 +285,10 @@ pub fn download(
                 String::from_utf8_lossy(&out.stderr).trim()
             );
             let _ = std::fs::remove_file(&tmp);
+            dead_rounds += 1;
+            if dead_rounds >= MAX_DEAD_ROUNDS {
+                break;
+            }
             std::thread::sleep(Duration::from_secs(2));
             continue;
         }
@@ -314,15 +324,21 @@ pub fn download(
                 String::new()
             }
         );
-        // 有进展就立刻接着要下一段（CDN 通常只给一小块），没进展才等一下
         if got == 0 {
+            dead_rounds += 1;
+            if dead_rounds >= MAX_DEAD_ROUNDS {
+                break;
+            }
             std::thread::sleep(Duration::from_secs(2));
+        } else {
+            dead_rounds = 0;
         }
     }
 
     let bytes = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_file(part.with_extension("fetching"));
     if bytes == 0 {
-        return Err(format!("下载失败：一个字节都没拿到（{}）", last_error));
+        return Err(format!("下载失败：没拿到数据（{}）", last_error));
     }
     if total > 0 && bytes < total {
         return Err(format!(
@@ -331,23 +347,7 @@ pub fn download(
         ));
     }
     std::fs::rename(&part, dest).map_err(|e| format!("改名失败：{}", e))?;
-    let _ = std::fs::remove_file(part.with_extension("fetching"));
     Ok(DownloadResult { bytes, elapsed: started.elapsed() })
-}
-
-pub fn human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{} {}", bytes, UNITS[0])
-    } else {
-        format!("{:.1} {}", v, UNITS[i])
-    }
 }
 
 #[cfg(test)]
