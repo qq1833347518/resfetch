@@ -435,9 +435,27 @@ fn try_merge(video: &Path, audio: &Path, out: &Path) -> bool {
 }
 
 /// B 站媒体 CDN 不支持 HEAD（`curl -I` 直接 404），所以不探测长度，直接续传下。
-fn fetch_bili_stream(url: &str, dest: &Path, cookie: Option<&Path>, referer: &str) -> Result<u64, String> {
-    let r = crate::http::download(url, dest, 0, cookie, Some(referer))?;
-    Ok(r.bytes)
+/// 同一份流的 `baseUrl` 与 `backupUrl` 指向镜像，内容逐字节相同，所以换地址后
+/// `.part` 里的已下数据可以继续追加，不必从头再下。
+fn fetch_bili_stream(urls: &[String], dest: &Path, cookie: Option<&Path>, referer: &str) -> Result<u64, String> {
+    let mut last = String::from("没有可用地址");
+    for (i, u) in urls.iter().enumerate() {
+        match crate::http::download(u, dest, 0, cookie, Some(referer)) {
+            Ok(r) => {
+                if i > 0 {
+                    eprintln!("已切到备用地址 #{}", i);
+                }
+                return Ok(r.bytes);
+            }
+            Err(e) => {
+                last = format!("地址 #{} 失败：{}", i, e);
+                if i + 1 < urls.len() {
+                    eprintln!("{}，换备用地址", last);
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 fn download_bilibili(task: &Task, dest: &Path, cookie: Option<&Path>) -> Result<u64, String> {
@@ -475,7 +493,7 @@ fn download_bilibili(task: &Task, dest: &Path, cookie: Option<&Path>) -> Result<
         let mut segs: Vec<PathBuf> = Vec::new();
         for (i, u) in urls.durl.iter().enumerate() {
             let p = sibling(dest, &format!("durl{}", i + 1));
-            total += fetch_bili_stream(u, &p, cookie, REFERER)?;
+            total += fetch_bili_stream(std::slice::from_ref(u), &p, cookie, REFERER)?;
             segs.push(p);
         }
         let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
@@ -488,17 +506,17 @@ fn download_bilibili(task: &Task, dest: &Path, cookie: Option<&Path>) -> Result<
         return Ok(n);
     }
 
-    let vurl = resfetch_core::bilibili::best(&urls.videos)
-        .map(|s| s.url.clone())
+    let vurls = resfetch_core::bilibili::best(&urls.videos)
+        .map(|s| s.urls())
         .ok_or_else(|| "playurl 里没有可用视频流".to_string())?;
-    let aurl = resfetch_core::bilibili::best(&urls.audios).map(|s| s.url.clone());
+    let aurls = resfetch_core::bilibili::best(&urls.audios).map(|s| s.urls());
 
     let vpath = sibling(dest, "video.m4s");
-    let vbytes = fetch_bili_stream(&vurl, &vpath, cookie, REFERER)?;
+    let vbytes = fetch_bili_stream(&vurls, &vpath, cookie, REFERER)?;
 
-    if let Some(aurl) = aurl {
+    if let Some(aurls) = aurls {
         let apath = sibling(dest, "audio.m4s");
-        let abytes = fetch_bili_stream(&aurl, &apath, cookie, REFERER)?;
+        let abytes = fetch_bili_stream(&aurls, &apath, cookie, REFERER)?;
         if try_merge(&vpath, &apath, dest) {
             let n = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(vbytes + abytes);
             let _ = std::fs::remove_file(&vpath);
